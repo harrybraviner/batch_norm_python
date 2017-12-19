@@ -111,9 +111,13 @@ class BatchNormalizableNetwork:
         self._fc3_u = self._single_layer_forward_prop(self._fc2_u, self._fc3_W, self._fc3_b, self._fc3_gamma, self._fc3_beta)
         self._out_u = np.matmul(self._fc3_u, self._out_W) + self._out_b
 
-    def _get_loss(self, y_target):
-        
-        raise NotImplementedError
+    def _get_losses(self, target_ix):
+        y_hat = BatchNormalizableNetwork.softmax(self._out_u)
+        true_y_hat = y_hat[np.arange(len(y_hat)), target_ix]
+        return -np.log(true_y_hat)
+
+    def _get_loss(self, target_ix):
+        return np.sum(self._get_losses(target_ix))
 
     def softmax(x):
         n_out = x.shape[1]
@@ -206,6 +210,19 @@ class BatchNormalizableNetworkTests(unittest.TestCase):
                                     [np.exp(-1.0)/(np.exp(-1.0) + np.exp(0.0)), np.exp(0.0)/(np.exp(-1.0) + np.exp(0.0))]])
 
         numpy.testing.assert_array_almost_equal(expected_output, BatchNormalizableNetwork.softmax(out_u), decimal=8)
+
+    def test_get_loss(self):
+        net = BatchNormalizableNetwork(False)
+        net._out_u = np.zeros(shape = [3, 10])
+        net._out_u[0, 0] = 100.0
+        net._out_u[1, 5] = -100.0
+        target_y_ix = np.array([0, 5, 1])
+        
+        losses = net._get_losses(target_y_ix)
+        expected_output = np.array([0.0, -np.log(np.exp(-100)/(np.exp(-100) + 9)), -np.log(0.1)])
+        
+        numpy.testing.assert_array_almost_equal(expected_output, losses)
+
 
 #    def test_check_gradients_no_norm(self):
 #
