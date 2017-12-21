@@ -138,18 +138,20 @@ class BatchNormalizableNetwork:
             x_delta = x_unnorm - x_mean
             x_variance = np.mean(x_delta*x_delta, axis=0)
             x_norm = (x_unnorm - x_mean) / np.sqrt(x_variance + self._epsilon)
-            x_final = gamma*x_norm + beta_x_norm
+            x_final = gamma*x_norm + beta
         else:
+            x_mean = None
+            x_variance = None
             x_final = np.matmul(u, W) + b
 
-        return self._non_linearity(x_final)
+        return self._non_linearity(x_final), x_mean, x_variance
 
     def _forward_propagate(self, inputs):
         
         self._inputs = inputs
-        self._fc1_u = self._single_layer_forward_prop(inputs,      self._fc1_W, self._fc1_b, self._fc1_gamma, self._fc1_beta)
-        self._fc2_u = self._single_layer_forward_prop(self._fc1_u, self._fc2_W, self._fc2_b, self._fc2_gamma, self._fc2_beta)
-        self._fc3_u = self._single_layer_forward_prop(self._fc2_u, self._fc3_W, self._fc3_b, self._fc3_gamma, self._fc3_beta)
+        self._fc1_u, self._fc1_x_mean, self._fc1_x_var = self._single_layer_forward_prop(inputs,      self._fc1_W, self._fc1_b, self._fc1_gamma, self._fc1_beta)
+        self._fc2_u, self._fc2_x_mean, self._fc2_x_var = self._single_layer_forward_prop(self._fc1_u, self._fc2_W, self._fc2_b, self._fc2_gamma, self._fc2_beta)
+        self._fc3_u, self._fc3_x_mean, self._fc3_x_var = self._single_layer_forward_prop(self._fc2_u, self._fc3_W, self._fc3_b, self._fc3_gamma, self._fc3_beta)
         self._out_u = np.matmul(self._fc3_u, self._out_W) + self._out_b
 
     def _get_losses(self, target_ix):
@@ -167,13 +169,26 @@ class BatchNormalizableNetwork:
         norms = np.sum(safe_exp_x, axis=1)
         return safe_exp_x / np.stack([norms for _ in range(n_out)], axis=1)
 
+    def _make_d_dx(self, x, mean, var, d_dx_hat):
+        """ Back propagates the error through the batch-normalization
+        layer.
+        """
+        if not self._batch_norm:
+            raise ValueError('Must not call _make_d_dx on un-normalized network')
+
+        m = x.shape[0]
+        d_d_sigma2 = -0.5 * np.sum(d_dx_hat * (x - mean), axis=0) * (var + self._epsilon)**(-1.5)
+        d_d_mu = -1.0 * np.sum(d_dx_hat, axis=0) * (var + self._epsilon)**(-0.5) \
+                -2.0 * d_d_sigma2 * np.mean(x - mean, axis=0)
+        d_d_x = d_dx_hat * (var + self._epsilon)**(-0.5) \
+                + 2.0 * d_d_sigma2 * (x - mean) / m \
+                + d_d_mu / m
+        return d_d_x
+
     def _back_propagate(self, target_ix):
         batch_size = target_ix.shape[0]
         delta_out = BatchNormalizableNetwork.softmax(self._out_u)
         delta_out[np.arange(len(target_ix)), target_ix] -= 1.0
-
-        if self._batch_norm:
-            raise NotImplementedError
 
         self._out_b_gradient = np.mean(delta_out, axis=0)
         # Need the below per-batch member
@@ -184,26 +199,42 @@ class BatchNormalizableNetwork:
         delta_fc3 = np.matmul(delta_out, self._out_W.T) * self._non_linearity_deriv(self._fc3_u)
         if not self._batch_norm:
             self._fc3_b_gradient = np.mean(delta_fc3, axis=0)
-        self._fc3_W_gradient = np.tensordot(self._fc2_u, delta_fc3, axes=[0, 0]) / batch_size
+            self._fc3_W_gradient = np.tensordot(self._fc2_u, delta_fc3, axes=[0, 0]) / batch_size
+        else:
+            self._fc3_beta_gradient = np.mean(delta_fc3, axis=0)
+            fc3_x_hat = (np.matmul(self._fc2_u, self._fc3_W) - self._fc3_x_mean)/np.sqrt(self._fc3_x_var + self._epsilon)
+            self._fc3_gamma_gradient = np.mean(fc3_x_hat * delta_fc3, axis=0)
+            # Notation of Ioffe & Szegedy, x = u.W
+            delta_fc3_x = self._make_d_dx(np.matmul(self._fc2_u, self._fc3_W),
+                                          self._fc3_x_mean, self._fc3_x_var, delta_fc3 * self._fc3_gamma)
+            self._fc3_W_gradient = np.tensordot(self._fc2_u, delta_fc3_x, axes=[0, 0]) / batch_size
 
-        delta_fc2 = np.matmul(delta_fc3, self._fc3_W.T) * self._non_linearity_deriv(self._fc2_u)
         if not self._batch_norm:
+            delta_fc2 = np.matmul(delta_fc3, self._fc3_W.T) * self._non_linearity_deriv(self._fc2_u)
             self._fc2_b_gradient = np.mean(delta_fc2, axis=0)
-        self._fc2_W_gradient = np.tensordot(self._fc1_u, delta_fc2, axes=[0, 0]) / batch_size
+            self._fc2_W_gradient = np.tensordot(self._fc1_u, delta_fc2, axes=[0, 0]) / batch_size
+        else:
+            delta_fc2 = np.matmul(delta_fc3_x, self._fc3_W.T) * self._non_linearity_deriv(self._fc2_u)
+            self._fc2_beta_gradient = np.mean(delta_fc2, axis=0)
+            fc2_x_hat = (np.matmul(self._fc1_u, self._fc2_W) - self._fc2_x_mean)/np.sqrt(self._fc2_x_var + self._epsilon)
+            self._fc2_gamma_gradient = np.mean(fc2_x_hat * delta_fc2, axis=0)
+            delta_fc2_x = self._make_d_dx(np.matmul(self._fc1_u, self._fc2_W),
+                                          self._fc2_x_mean, self._fc2_x_var, delta_fc2 * self._fc2_gamma)
+            self._fc2_W_gradient = np.tensordot(self._fc1_u, delta_fc2_x, axes=[0, 0]) / batch_size
 
-        delta_fc1 = np.matmul(delta_fc2, self._fc2_W.T) * self._non_linearity_deriv(self._fc1_u)
         if not self._batch_norm:
+            delta_fc1 = np.matmul(delta_fc2, self._fc2_W.T) * self._non_linearity_deriv(self._fc1_u)
             self._fc1_b_gradient = np.mean(delta_fc1, axis=0)
-        self._fc1_W_gradient = np.tensordot(self._inputs, delta_fc1, axes=[0, 0]) / batch_size
-
-        # FIXME - below here is just junk
-        #self._fc3_W_gradient = np.zeros(shape = self._fc3_W.shape)
-        #self._fc3_b_gradient = np.zeros(shape = self._fc3_b.shape)
-        #self._fc2_W_gradient = np.zeros(shape = self._fc2_W.shape)
-        #self._fc2_b_gradient = np.zeros(shape = self._fc2_b.shape)
-        #self._fc1_W_gradient = np.zeros(shape = self._fc1_W.shape)
-        #self._fc1_b_gradient = np.zeros(shape = self._fc1_b.shape)
-
+            self._fc1_W_gradient = np.tensordot(self._inputs, delta_fc1, axes=[0, 0]) / batch_size
+        else:
+            delta_fc1 = np.matmul(delta_fc2_x, self._fc2_W.T) * self._non_linearity_deriv(self._fc1_u)
+            self._fc1_beta_gradient = np.mean(delta_fc1, axis=0)
+            fc1_x_hat = (np.matmul(self._inputs, self._fc1_W) - self._fc1_x_mean)/np.sqrt(self._fc1_x_var + self._epsilon)
+            self._fc1_gamma_gradient = np.mean(fc1_x_hat * delta_fc1, axis=0)
+            delta_fc1_x = self._make_d_dx(np.matmul(self._inputs, self._fc1_W),
+                                          self._fc1_x_mean, self._fc1_x_var, delta_fc1 * self._fc1_gamma)
+            self._fc1_W_gradient = np.tensordot(self._inputs, delta_fc1_x, axes=[0, 0]) / batch_size
+                                
     def _take_gradient_step(self):
         self._fc1_W += -self._learning_rate*self._fc1_W_gradient
         self._fc2_W += -self._learning_rate*self._fc2_W_gradient
@@ -365,12 +396,30 @@ class BatchNormalizableNetworkTests(unittest.TestCase):
             raise AssertionError(error_message)
 
     def test_gradients_no_norm(self):
-        net = BatchNormalizableNetwork(False, input_size=28*1, fc1_size=13,
+        net = BatchNormalizableNetwork(False, input_size=28, fc1_size=13,
                                        fc2_size=7, fc3_size=5, output_size=3)
+        # Note that these are listed in backwards order!
         segment_sizes = [('out_b', 3),  ('out_W', 5*3),
                          ('fc3_b', 5),  ('fc3_W', 7*5),
                          ('fc2_b', 7),  ('fc2_W', 13*7),
-                         ('fc1_b', 13), ('fc1_W', 28*1*13)]
+                         ('fc1_b', 13), ('fc1_W', 28*13)]
+        ix = sum([s for (_, s) in segment_sizes])
+        segments = []
+        for (name, size) in segment_sizes:
+            ix -= size
+            segments.append((name, (ix, size)))
+        BatchNormalizableNetworkTests.check_gradients(net, segments)
+
+    def test_gradients_with_norm(self):
+        net = BatchNormalizableNetwork(True, input_size=28, fc1_size=13,
+                                       fc2_size=7, fc3_size=5, output_size=3)
+        # Note that these are listed in backwards order!
+        segment_sizes = [('fc3_gamma', 5),  ('fc3_beta', 5),
+                         ('fc2_gamma', 7),  ('fc2_beta', 7),
+                         ('fc1_gamma', 13), ('fc1_beta', 13),
+                         ('out_b', 3),   ('out_W', 5*3),
+                         ('fc3_W', 7*5), ('fc2_W', 13*7),
+                         ('fc1_W', 28*13)]
         ix = sum([s for (_, s) in segment_sizes])
         segments = []
         for (name, size) in segment_sizes:
