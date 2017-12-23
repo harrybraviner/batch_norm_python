@@ -18,6 +18,8 @@ class BatchNormalizableNetwork:
             raise TypeError('Argument batch_norm must be a bool')
 
         self._batch_norm = batch_norm
+        if self._batch_norm:
+            self._inference_stats_up_to_date = False
 
         self._fc1_n = fc1_size
         self._fc2_n = fc2_size
@@ -248,15 +250,56 @@ class BatchNormalizableNetwork:
             self._fc2_gamma += -self._learning_rate*self._fc2_gamma_gradient
             self._fc3_beta += -self._learning_rate*self._fc3_beta_gradient
             self._fc3_gamma += -self._learning_rate*self._fc3_gamma_gradient
+
+            self._inference_stats_up_to_date = False
         else:
             self._fc1_b += -self._learning_rate*self._fc1_b_gradient
             self._fc2_b += -self._learning_rate*self._fc2_b_gradient
             self._fc3_b += -self._learning_rate*self._fc3_b_gradient
 
+    def calibrate_means_and_variances(self, inputs_batches):
+        """During training the E(x) and Var(x) at the batch-normalisation layers
+        are just the value from that training batch. At inference time we use the
+        values from the entire training set.
+        This method computes and saves those values for the training set.
+        """
+
+        if not self._batch_norm:
+            raise NotImplementedError("_calibrate_means_and_variances is not meaningful when batch_norm = False")
+
+        fc1_x_means_and_vars = []
+        fc2_x_means_and_vars = []
+        fc3_x_means_and_vars = []
+        for inputs in inputs_batches:
+            batch_size = inputs.shape[0]
+            fc1_u, fc1_x_mean, fc1_x_var = self._single_layer_forward_prop(inputs, self._fc1_W, self._fc1_b, self._fc1_gamma, self._fc1_beta)
+            fc2_u, fc2_x_mean, fc2_x_var = self._single_layer_forward_prop(self._fc1_u, self._fc2_W, self._fc2_b, self._fc2_gamma, self._fc2_beta)
+            fc3_u, fc3_x_mean, fc3_x_var = self._single_layer_forward_prop(self._fc2_u, self._fc3_W, self._fc3_b, self._fc3_gamma, self._fc3_beta)
+            fc1_x_means_and_vars.append((batch_size, fc1_x_mean, fc1_x_var))
+            fc2_x_means_and_vars.append((batch_size, fc2_x_mean, fc2_x_var))
+            fc3_x_means_and_vars.append((batch_size, fc3_x_mean, fc3_x_var))
+
+        total_N = sum([n for (n, _, _) in fc1_x_means_and_vars])
+        self._inf_fc1_x_mean = sum([n*m for (n, m, _) in fc1_x_means_and_vars])/total_N
+        self._inf_fc1_x_var  = sum([n*v for (n, _, v) in fc1_x_means_and_vars])/total_N
+        self._inf_fc2_x_mean = sum([n*m for (n, m, _) in fc2_x_means_and_vars])/total_N
+        self._inf_fc2_x_var  = sum([n*v for (n, _, v) in fc2_x_means_and_vars])/total_N
+        self._inf_fc3_x_mean = sum([n*m for (n, m, _) in fc3_x_means_and_vars])/total_N
+        self._inf_fc3_x_var  = sum([n*v for (n, _, v) in fc3_x_means_and_vars])/total_N
+
+        self._inference_stats_up_to_date = True
+
     def train_for_single_batch(self, inputs, y_target):
         self._forward_propagate(inputs)
         self._back_propagate(y_target)
         self._take_gradient_step()
+
+    def perform_inference_for_batch(self, inputs):
+        if self._batch_norm and not self._inference_stats_up_to_date:
+            raise ValueError("Inference means and variances are not calibrated!")
+        self._forward_propagate(inputs)
+        y_hat = BatchNormalizableNetwork.softmax(self._out_u)
+        return y_hat
             
     # FIXME - remember that forward propagation during training and inference are different
     #         since inference-time uses the statistics of the whole training set
@@ -426,3 +469,23 @@ class BatchNormalizableNetworkTests(unittest.TestCase):
             ix -= size
             segments.append((name, (ix, size)))
         BatchNormalizableNetworkTests.check_gradients(net, segments)
+
+    def test_training_and_inference_runs(self):
+        net = BatchNormalizableNetwork(True, input_size=28, fc1_size=13,
+                                       fc2_size=7, fc3_size=5, output_size=3)
+
+        batch_size = 5
+        num_batches = 10
+
+        training_batches = [np.random.uniform(size = [batch_size, 28]) for i in range(num_batches)]
+        training_targets = [np.random.choice(3, size = [batch_size]) for i in range(num_batches)]
+
+        for (x, y) in zip(training_batches, training_targets):
+            net.train_for_single_batch(x, y)
+        net.calibrate_means_and_variances(training_batches)
+
+        inference_batch_size = 4 # Test that it should work fine with difference batch sizes
+        inference_inputs = np.random.uniform(size = [inference_batch_size, 28])
+        y_hat = net.perform_inference_for_batch(inference_inputs)
+
+        self.assertEqual(y_hat.shape, (inference_batch_size, 3))
