@@ -57,15 +57,16 @@ class ImageAndLabelSet:
 
     def getNextBatch(self, batchSize):
         image_batch = np.reshape([], (0, 784))
-        label_batch = np.reshape([], (0, 10))
+        label_batch = []
         remaining_images = batchSize
         while (remaining_images > 0):
             image_batch = np.concatenate([image_batch, np.reshape(self.image_set.getImageAsFloatArray(self.next_index), (1, 784))], axis=0)
-            label_batch = np.concatenate([label_batch, np.reshape(self.label_set.getOneHotLabel(self.next_index), (1, 10))], axis=0)
+            label_batch = np.concatenate([label_batch, [self.label_set.getLabel(self.next_index)]], axis=0)
             remaining_images -= 1
             self.next_index = self.next_index + 1
             if (self.next_index > self.N_images):
                 self.next_index = 1
+        label_batch = label_batch.astype(dtype=np.int32)
         return image_batch, label_batch
 
     def getAll(self):
@@ -76,7 +77,7 @@ class ImageAndLabelSet:
         return batch_for_return
 
 def get_training_set():
-    return ImageAndLabelSet("../tensorflow_sandbox/data/train-images-idx3-ubyte", "../data/train-labels-idx1-ubyte")
+    return ImageAndLabelSet("../tensorflow_sandbox/data/train-images-idx3-ubyte", "../tensorflow_sandbox/data/train-labels-idx1-ubyte")
 
 def get_test_set():
-    return ImageAndLabelSet("../tensorflow_sandbox/data/t10k-images-idx3-ubyte", "../data/t10k-labels-idx1-ubyte")
+    return ImageAndLabelSet("../tensorflow_sandbox/data/t10k-images-idx3-ubyte", "../tensorflow_sandbox/data/t10k-labels-idx1-ubyte")
