@@ -1,6 +1,7 @@
 #! /usr/bin/python3
 
 import network, mnist
+import time
 import numpy as np
 
 class Trainer:
@@ -15,7 +16,7 @@ class Trainer:
         else:
             hidden_layer_size=100
         self._net = network.BatchNormalizableNetwork(batch_norm=batch_norm, input_size=28*28,
-                                                     fc1_size = hidden_layer_size, fc2_size = hidden_layer_size, fc3_size = hidden_layer_size,
+                                                     fc1_size = 100, fc2_size = hidden_layer_size, fc3_size = hidden_layer_size,
                                                      output_size=10)
 
         self._loss_history = []
@@ -23,7 +24,9 @@ class Trainer:
     def train_batch(self):
 
         im_batch, label_batch = self._training_set.getNextBatch(self._batch_size)
-        im_batch = np.reshape(im_batch, newshape = [-1, 28*28])
+        #label_batch = np.array([9]*(len(label_batch)))
+
+        #print('labels: {}'.format(label_batch))
 
         self._net.train_for_single_batch(im_batch, label_batch)
         self._loss_history.append(self._net._smoothed_cross_entropy_loss)
@@ -32,11 +35,15 @@ class Trainer:
         return self._loss_history[-1]
 
 def main():
-    trainer = Trainer(small_net=False)
+    trainer = Trainer(small_net=True)
 
-    for i in range(10000):
+    start_time = time.time()
+
+    for i in range(50000):
         trainer.train_batch()
         if i%100 == 0:
+            elapsed_time = time.time() - start_time
+            print('wall-clock time: {}\tbatches: {}'.format(elapsed_time, i))
             print('loss: {}'.format(trainer.smoothed_training_loss()))
 
 if __name__ == '__main__':

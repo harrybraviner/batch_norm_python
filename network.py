@@ -35,6 +35,17 @@ class BatchNormalizableNetwork:
 
         self._setup_weights()
 
+        self._smoothed_cross_entropy_loss = None
+        self._smoothing_decay = 0.95
+
+    def _updated_smoothed_loss(self, current_loss):
+        if self._smoothed_cross_entropy_loss is None:
+            self._smoothed_cross_entropy_loss = current_loss
+        else:
+            a = self._smoothing_decay
+            self._smoothed_cross_entropy_loss *= a
+            self._smoothed_cross_entropy_loss += (1.0 - a) * current_loss
+
     def _relu(x):
         if x < 0.0:
             return 0.0
@@ -48,10 +59,12 @@ class BatchNormalizableNetwork:
             return 1.0
 
     def _make_weights(shape):
-        return np.random.uniform(low=-0.01, high=0.01, size=shape)
+        c = np.sqrt(6.0 / (shape[0] + shape[1]))
+        return np.random.uniform(low = -c, high = +c, size=shape)
 
     def _make_biases(shape):
-        return np.random.uniform(low=0.0, high=0.01, size=shape)
+        #return np.random.uniform(low=0.1, high=0.11, size=shape)
+        return np.zeros(shape=shape)
 
     def _setup_weights(self):
         self._fc1_W = BatchNormalizableNetwork._make_weights([self._input_n, self._fc1_n])
@@ -291,6 +304,8 @@ class BatchNormalizableNetwork:
 
     def train_for_single_batch(self, inputs, y_target):
         self._forward_propagate(inputs)
+        loss = self._get_loss(y_target)
+        self._updated_smoothed_loss(loss)
         self._back_propagate(y_target)
         self._take_gradient_step()
 
